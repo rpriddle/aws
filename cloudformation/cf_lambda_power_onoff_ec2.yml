@@ -1,0 +1,155 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Creates A power cycle lambda and role with policy
+Parameters:
+  TagName:
+    Type: String
+    Default: env
+    Description: Tag name that will be used to locate instances
+  TagValue:
+    Type: String
+    Default: dev
+    Description: Tag value used to locate instances
+  StartExpression:
+    Type: String
+    Default: 0 6 * * ? *
+    Description: Cron expression for cloudwatch event trigger starting of instances
+  StopExpression:
+    Type: String
+    Default: 0 18 * * ? *
+    Description: Cron expression for cloudwatch event trigger starting of instances
+Resources:
+  #Below is for Insert Lambda
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::Stackname}-${AWS::Region}-ec2-power-lambda'
+      Handler: index.lambda_handler
+      Runtime: python2.7
+      Description: Creates Lambda and roles to power off or on a ec2 instance based on tags
+      Environment:
+        Variables:
+          tagName: !Ref TagName
+          tagValue: !Ref TagValue
+      Code: 
+        ZipFile: |
+          import boto3
+          import json
+          import os
+          tagName = os.environ['tagName']
+          tagValue = os.environ['tagValue']
+          region = 'ap-southeast-2'
+          #instances = ['i-059e4fe1feaec0ca1']
+
+          def lambda_handler(event, context):
+              instances = getinstancesbytag(tagName,tagValue)
+              ec2 = boto3.client('ec2', region_name=region)
+          #    print(instances)
+              if(event['event'] == "stop" and instances):
+                ec2.stop_instances(InstanceIds=instances)
+                print 'stopped your instances: ' + str(instances)
+              if(event['event'] == "start" and instances):
+                ec2.start_instances(InstanceIds=instances)
+                print 'started instances: ' + str(instances)
+
+          def getinstancesbytag(tagkey, tagvalue):
+              # When passed a tag key, tag value this will return a list of InstanceIds that were found.
+
+              ec2client = boto3.client('ec2')
+
+              response = ec2client.describe_instances(
+                  Filters=[
+                      {
+                          'Name': 'tag:'+tagkey,
+                          'Values': [tagvalue]
+                      }
+                  ]
+              )
+              instancelist = []
+              for reservation in (response["Reservations"]):
+                  for instance in reservation["Instances"]:
+                      instancelist.append(instance["InstanceId"])
+              return instancelist
+      MemorySize: 128
+      Timeout: 300
+      Role: !GetAtt 'LambdaRole.Arn'
+  LambdaRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: !Sub '${AWS::Stackname}-${AWS::Region}-ec2-power-lambda-role'
+        AssumeRolePolicyDocument:
+          Version: 2012-10-17
+          Statement:
+            -
+              Effect: Allow
+              Principal:
+                Service:
+                  - lambda.amazonaws.com
+              Action:
+                - sts:AssumeRole
+        Path: /
+  LambdaPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${AWS::Stackname}-${AWS::Region}-ec2-power-lambda-policy'
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+         - 
+           Effect: Allow
+           Action:
+            - 'logs:CreateLogStream'
+            - 'logs:PutLogEvents'
+           Resource: 'arn:aws:logs:*:*:*'
+         - 
+           Effect: Allow
+           Action:
+            - 'ec2:DescribeInstances'
+            - 'ec2:Start*'
+            - 'ec2:Stop*'
+           Resource: '*'
+         - 
+           Effect: Allow
+           Action: 'logs:CreateLogGroup'
+           Resource: 'arn:aws:logs:*:*:*'
+      Roles:
+        - !Ref 'LambdaRole'
+        
+  LambdaStartSchedule:
+    Type: "AWS::Events::Rule"
+    Properties:
+      Name: !Sub '${AWS::Stackname}-${AWS::Region}-ec2-power-event-start'
+      Description: >
+        A schedule for the Lambda function..
+      ScheduleExpression: !Sub 'cron(${StartExpression})'
+      State: ENABLED
+      Targets:
+        - Arn: !Sub ${LambdaFunction.Arn}
+          Id: LambdaStartSchedule
+          Input: '{"event":"start"}'
+  LambdaStopSchedule:
+    Type: "AWS::Events::Rule"
+    Properties:
+      Name: !Sub '${AWS::Stackname}-${AWS::Region}-ec2-power-event-stop'
+      Description: >
+        A schedule for the Lambda function..
+      ScheduleExpression: !Sub 'cron(${StopExpression})'
+      State: ENABLED
+      Targets:
+        - Arn: !Sub ${LambdaFunction.Arn}
+          Id: LambdaStopSchedule
+          Input: '{"event":"stop"}'
+  LambdaStartSchedulePermission:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Sub ${LambdaFunction.Arn}
+      Principal: 'events.amazonaws.com'
+      SourceArn: !Sub ${LambdaStartSchedule.Arn}
+  LambdaStopSchedulePermission:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Sub ${LambdaFunction.Arn}
+      Principal: 'events.amazonaws.com'
+      SourceArn: !Sub ${LambdaStopSchedule.Arn}
